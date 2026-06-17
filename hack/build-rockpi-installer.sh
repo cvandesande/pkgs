@@ -7,7 +7,7 @@ set -euo pipefail
 # Defaults match the local RockPI PCIe compatibility workflow. Override any of these
 # values in the environment, for example:
 #
-#   CUSTOM_TAG=v1.13.4-rockpi-pcie-phyidle1 hack/build-rockpi-installer.sh
+#   CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1 hack/build-rockpi-installer.sh
 #
 # Optional skips for resuming after a failed later step:
 #
@@ -22,7 +22,7 @@ PKGS_DIR="${PKGS_DIR:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
 TALOS_DIR="${TALOS_DIR:-/home/cvandesande/github/talos-v1.13.4-rockpi}"
 
 TALOS_TAG="${TALOS_TAG:-v1.13.4}"
-CUSTOM_TAG="${CUSTOM_TAG:-v1.13.4-rockpi-pcie-phyidle1}"
+CUSTOM_TAG="${CUSTOM_TAG:-v1.13.4-rockpi-pcie-perst1}"
 
 if [[ "${CUSTOM_TAG}" == "${TALOS_TAG}"* ]]; then
   DEFAULT_TAG_SUFFIX="${CUSTOM_TAG#"${TALOS_TAG}"}"

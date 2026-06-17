@@ -21,7 +21,7 @@ Shortcut script for the current RockPI PCIe compatibility build:
 
 ```sh
 cd /home/cvandesande/github/pkgs
-CUSTOM_TAG=v1.13.4-rockpi-pcie-phyidle1 hack/build-rockpi-installer.sh
+CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1 hack/build-rockpi-installer.sh
 ```
 
 Current RockPI PCIe/SATA compatibility patch set:
@@ -33,11 +33,17 @@ Current RockPI PCIe/SATA compatibility patch set:
   PCI enumeration, matching the Armbian 6.1 behavior after link-up.
 - Preserve the historical RK3399 PCIe reset ordering inside the newer 6.18
   reset-bulk driver flow: PM assert/deassert order and core assert order.
-- Move Rockchip PCIe PHY lane de-idle until after PHY reset deassert, matching
-  the known-good 6.1 pre-link ordering while keeping 6.18 all-lane enablement.
+- Keep the upstream/spec PERST# waits, but move Rockchip Gen1 link-training
+  enable so it occurs immediately before PERST# release, restoring the
+  known-good 6.1 relationship instead of training while the endpoint is still
+  held in reset.
 - Do not include extra link-training logging, endpoint power retries, or
   runtime tuning knobs. The goal is an upstream-shaped patch stack with only
   board/driver compatibility changes.
+
+See [`docs/rockpi-pcie-6.1-vs-6.18-delta.md`](docs/rockpi-pcie-6.1-vs-6.18-delta.md)
+for the exact working Armbian provenance, live Talos DT comparison, and scoped
+PCIe init delta table.
 
 > **Important:** if the RockPI cannot see the PCIe SATA controller while booted
 > into the installer environment, an installer container alone is not enough: the
@@ -85,7 +91,7 @@ cd /home/cvandesande/github/pkgs
 
 export REGISTRY=registry.gitlab.com
 export USERNAME=cvandesande/dockers/talos-rockpi
-export CUSTOM_TAG=v1.13.4-rockpi-pcie-phyidle1
+export CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1
 
 make kernel \
   PLATFORM=linux/arm64 \
@@ -99,7 +105,7 @@ make kernel \
 This pushes:
 
 ```text
-registry.gitlab.com/cvandesande/dockers/talos-rockpi/kernel:v1.13.4-rockpi-pcie-phyidle1
+registry.gitlab.com/cvandesande/dockers/talos-rockpi/kernel:v1.13.4-rockpi-pcie-perst1
 ```
 
 ### 2. Clone Talos v1.13.4
@@ -115,11 +121,11 @@ cd talos-v1.13.4-rockpi
 ```sh
 export REGISTRY=registry.gitlab.com
 export USERNAME=cvandesande/dockers/talos-rockpi
-export CUSTOM_TAG=v1.13.4-rockpi-pcie-phyidle1
+export CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1
 
 # Keep the Talos version as v1.13.4, but tag pushed images with the custom suffix.
 export TAG=v1.13.4
-export TAG_SUFFIX=-rockpi-pcie-armbian1
+export TAG_SUFFIX=-rockpi-pcie-perst1
 
 export PKG_KERNEL="${REGISTRY}/${USERNAME}/kernel:${CUSTOM_TAG}"
 ```
@@ -162,7 +168,7 @@ cat _out/installer_image
 The expected installer image is:
 
 ```text
-registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-phyidle1
+registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-perst1
 ```
 
 Use that image in Talos machine config:
@@ -170,7 +176,7 @@ Use that image in Talos machine config:
 ```yaml
 machine:
   install:
-    image: registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-phyidle1
+    image: registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-perst1
 ```
 
 ### 6. Build patched eMMC boot media
@@ -207,19 +213,19 @@ make target-sbc-rockchip \
 
 ```sh
 cd /home/cvandesande/github/pkgs
-CUSTOM_TAG=v1.13.4-rockpi-pcie-phyidle1 hack/build-rockpi-installer.sh
+CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1 hack/build-rockpi-installer.sh
 
-ls -lh artifacts/rockpi/v1.13.4-rockpi-pcie-phyidle1/
+ls -lh artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/
 ```
 
 Expected local artifacts:
 
 ```text
-artifacts/rockpi/v1.13.4-rockpi-pcie-phyidle1/talos-v1.13.4-rockpi-pcie-phyidle1-rockpi_4-arm64.raw.xz
+artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw.xz
 # or, depending on Talos/overlay output format:
-artifacts/rockpi/v1.13.4-rockpi-pcie-phyidle1/talos-v1.13.4-rockpi-pcie-phyidle1-rockpi_4-arm64.raw.zst
+artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw.zst
 
-artifacts/rockpi/v1.13.4-rockpi-pcie-phyidle1/talos-v1.13.4-rockpi-pcie-phyidle1-rockpi_4-arm64.raw
+artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw
 ```
 
 The `.raw` file is the eMMC-flashable image. The script should print a line like
@@ -252,7 +258,7 @@ Flash it only after verifying the target device path:
 
 ```sh
 lsblk
-sudo dd if=artifacts/rockpi/v1.13.4-rockpi-pcie-phyidle1/talos-v1.13.4-rockpi-pcie-phyidle1-rockpi_4-arm64.raw \
+sudo dd if=artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw \
   of=/dev/sdX \
   bs=4M \
   conv=fsync \
