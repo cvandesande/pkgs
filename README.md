@@ -21,22 +21,34 @@ Shortcut script for the current RockPI PCIe compatibility build:
 
 ```sh
 cd /home/cvandesande/github/pkgs
-CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1 hack/build-rockpi-installer.sh
+CUSTOM_TAG=v1.13.4-rockpi-pcie-min-only0012-1 hack/build-rockpi-installer.sh
 ```
+
+Confirmed working on the RockPi 4A / JMicron SATA setup:
+`v1.13.4-rockpi-pcie-perst-timing68-1` trains the RK3399 PCIe link,
+enumerates the AHCI controller, and exposes the SATA disks to Talos.
+
+Current minimization candidate:
+`v1.13.4-rockpi-pcie-min-only0012-1` disables the previous DT alignment patch
+(`0006`), bus-scan-delay driver patch (`0007`), PHY restoration patches
+(`0009` and `0010`), the RK3399 reset sequencing patch (`0008`), and the PERST
+initial-state patch (`0011`), while keeping only the PERST timing patch
+(`0012`) from the confirmed stack.
 
 Current RockPI PCIe/SATA compatibility patch set:
 
-- Align the Rock Pi 4 device tree with the known-working Armbian 23.11.1 /
-  Linux 6.1.63 PCIe properties: `vcc3v3_pcie` min/max voltage,
-  `vpcie12v-supply = <&vcc12v_dcin>`, and `bus-scan-delay-ms = <1500>`.
-- Add Rockchip host-driver support for consuming `bus-scan-delay-ms` before
-  PCI enumeration, matching the Armbian 6.1 behavior after link-up.
-- Preserve the historical RK3399 PCIe reset ordering inside the newer 6.18
-  reset-bulk driver flow: PM assert/deassert order and core assert order.
-- Keep the upstream/spec PERST# waits, but move Rockchip Gen1 link-training
-  enable so it occurs immediately before PERST# release, restoring the
-  known-good 6.1 relationship instead of training while the endpoint is still
-  held in reset.
+- Current minimization candidate disables the previous RockPi/RK3399 PCIe DT
+  and driver behavior/reset/PERST-initial-state patches:
+  - `0006`: RockPi PCIe DT alignment (`vcc3v3_pcie` min/max voltage,
+    `vpcie12v-supply`, and `bus-scan-delay-ms`);
+  - `0007`: `bus-scan-delay-ms` driver support;
+  - `0008`: RK3399 reset sequencing;
+  - `0009`: lane de-idle order and TEST_WRITE strobe behavior;
+  - `0010`: reference-clock lifecycle.
+  - `0011`: initial PERST GPIO state.
+- Restore the working 6.8 RK3399 PERST/link-training timing: enable Gen1
+  training, release PERST immediately, then poll link-up without the newer
+  100 ms pre-release and 100 ms post-release waits.
 - Do not include extra link-training logging, endpoint power retries, or
   runtime tuning knobs. The goal is an upstream-shaped patch stack with only
   board/driver compatibility changes.
@@ -91,7 +103,7 @@ cd /home/cvandesande/github/pkgs
 
 export REGISTRY=registry.gitlab.com
 export USERNAME=cvandesande/dockers/talos-rockpi
-export CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1
+export CUSTOM_TAG=v1.13.4-rockpi-pcie-min-only0012-1
 
 make kernel \
   PLATFORM=linux/arm64 \
@@ -105,7 +117,7 @@ make kernel \
 This pushes:
 
 ```text
-registry.gitlab.com/cvandesande/dockers/talos-rockpi/kernel:v1.13.4-rockpi-pcie-perst1
+registry.gitlab.com/cvandesande/dockers/talos-rockpi/kernel:v1.13.4-rockpi-pcie-min-only0012-1
 ```
 
 ### 2. Clone Talos v1.13.4
@@ -121,11 +133,11 @@ cd talos-v1.13.4-rockpi
 ```sh
 export REGISTRY=registry.gitlab.com
 export USERNAME=cvandesande/dockers/talos-rockpi
-export CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1
+export CUSTOM_TAG=v1.13.4-rockpi-pcie-min-only0012-1
 
 # Keep the Talos version as v1.13.4, but tag pushed images with the custom suffix.
 export TAG=v1.13.4
-export TAG_SUFFIX=-rockpi-pcie-perst1
+export TAG_SUFFIX=-rockpi-pcie-min-only0012-1
 
 export PKG_KERNEL="${REGISTRY}/${USERNAME}/kernel:${CUSTOM_TAG}"
 ```
@@ -168,7 +180,7 @@ cat _out/installer_image
 The expected installer image is:
 
 ```text
-registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-perst1
+registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-min-only0012-1
 ```
 
 Use that image in Talos machine config:
@@ -176,7 +188,7 @@ Use that image in Talos machine config:
 ```yaml
 machine:
   install:
-    image: registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-perst1
+    image: registry.gitlab.com/cvandesande/dockers/talos-rockpi/installer:v1.13.4-rockpi-pcie-min-only0012-1
 ```
 
 ### 6. Build patched eMMC boot media
@@ -213,19 +225,19 @@ make target-sbc-rockchip \
 
 ```sh
 cd /home/cvandesande/github/pkgs
-CUSTOM_TAG=v1.13.4-rockpi-pcie-perst1 hack/build-rockpi-installer.sh
+CUSTOM_TAG=v1.13.4-rockpi-pcie-min-only0012-1 hack/build-rockpi-installer.sh
 
-ls -lh artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/
+ls -lh artifacts/rockpi/v1.13.4-rockpi-pcie-min-only0012-1/
 ```
 
 Expected local artifacts:
 
 ```text
-artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw.xz
+artifacts/rockpi/v1.13.4-rockpi-pcie-min-only0012-1/talos-v1.13.4-rockpi-pcie-min-only0012-1-rockpi_4-arm64.raw.xz
 # or, depending on Talos/overlay output format:
-artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw.zst
+artifacts/rockpi/v1.13.4-rockpi-pcie-min-only0012-1/talos-v1.13.4-rockpi-pcie-min-only0012-1-rockpi_4-arm64.raw.zst
 
-artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw
+artifacts/rockpi/v1.13.4-rockpi-pcie-min-only0012-1/talos-v1.13.4-rockpi-pcie-min-only0012-1-rockpi_4-arm64.raw
 ```
 
 The `.raw` file is the eMMC-flashable image. The script should print a line like
@@ -258,7 +270,7 @@ Flash it only after verifying the target device path:
 
 ```sh
 lsblk
-sudo dd if=artifacts/rockpi/v1.13.4-rockpi-pcie-perst1/talos-v1.13.4-rockpi-pcie-perst1-rockpi_4-arm64.raw \
+sudo dd if=artifacts/rockpi/v1.13.4-rockpi-pcie-min-only0012-1/talos-v1.13.4-rockpi-pcie-min-only0012-1-rockpi_4-arm64.raw \
   of=/dev/sdX \
   bs=4M \
   conv=fsync \

@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 19 Jun 2026 00:05:00 +0100
+Subject: [PATCH] PCI: rockchip: Restore RK3399 6.8 PERST timing
+
+Armbian kernel narrowing showed that RK3399 PCIe works with the 6.8.11
+Rockchip64 edge kernel and fails by 6.12.x with:
+
+    rockchip-pcie f8000000.pcie: PCIe link training gen1 timeout!
+
+The Armbian Rockchip64 PCIe patch stack is semantically unchanged between
+the working 6.8 and failing 6.12 patch directories, leaving upstream
+Rockchip host-driver changes as the next divergence to test.
+
+One such change is the PERST/link-training timing.  Linux 6.8 enabled
+Gen1 link training, released endpoint reset immediately, and then started
+polling for link-up.  Linux 6.12 and newer add a 100 ms wait before
+releasing PERST and another 100 ms reset-to-config wait after release
+before polling.
+
+Restore the 6.8 timing for RK3399 only.  Keep the newer PCIe reset-timing
+waits for other Rockchip PCIe controllers.
+
+Signed-off-by: Codex <codex@local>
+---
+ drivers/pci/controller/pcie-rockchip-host.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pci/controller/pcie-rockchip-host.c b/drivers/pci/controller/pcie-rockchip-host.c
+index 111111111111..222222222222 100644
+--- a/drivers/pci/controller/pcie-rockchip-host.c
++++ b/drivers/pci/controller/pcie-rockchip-host.c
+@@ -283,6 +283,8 @@ static void rockchip_pcie_set_power_limit(struct rockchip_pcie *rockchip)
+ static int rockchip_pcie_host_init_port(struct rockchip_pcie *rockchip)
+ {
+ 	struct device *dev = rockchip->dev;
++	bool rk3399 = of_device_is_compatible(dev->of_node,
++					      "rockchip,rk3399-pcie");
+ 	int err, i = MAX_LANE_NUM;
+ 	u32 status;
+ 
+@@ -314,10 +316,14 @@ static int rockchip_pcie_host_init_port(struct rockchip_pcie *rockchip)
+ 	rockchip_pcie_write(rockchip, PCIE_CLIENT_LINK_TRAIN_ENABLE,
+ 			    PCIE_CLIENT_CONFIG);
+ 
+-	msleep(PCIE_T_PVPERL_MS);
++	if (!rk3399)
++		msleep(PCIE_T_PVPERL_MS);
++
+ 	gpiod_set_value_cansleep(rockchip->perst_gpio, 1);
+ 
+-	msleep(PCIE_RESET_CONFIG_WAIT_MS);
++	/* Preserve the working 6.8 RK3399 link-training/PERST timing. */
++	if (!rk3399)
++		msleep(PCIE_RESET_CONFIG_WAIT_MS);
+ 
+ 	/* 500ms timeout value should be enough for Gen1/2 training */
+ 	err = readl_poll_timeout(rockchip->apb_base + PCIE_CLIENT_BASIC_STATUS1,
+-- 
+2.43.0

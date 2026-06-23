@@ -78,36 +78,64 @@ Phandle numeric values differ, but that is normal and not meaningful by itself.
 
 | Area | Working 6.1 behavior | Current 6.18 behavior after our patches | Status |
 |---|---|---|---|
-| Rock Pi 4 PCIe DT supplies/timing | Armbian adds 12V supply, 3.3V min/max, 1500ms bus-scan delay | `0006` applies the same semantic DT properties | Aligned |
-| Bus-scan delay | Runs after link-up, before enumeration | `0007` implements it, but failing kernel never reaches it | Aligned but not causal |
-| PM reset order | assert `aclk -> pclk -> pm`; deassert `pm -> aclk -> pclk` | `0008` preserves that order despite 6.18 bulk reset conversion | Aligned |
-| Core reset order | assert `core -> mgmt -> mgmt-sticky -> pipe`; deassert `mgmt-sticky -> core -> mgmt -> pipe` | `0008` preserves assert order and keeps bulk deassert because reverse bulk order matches 6.1 | Aligned |
-| PHY lane de-idle | first lane de-idled after shared PHY reset deassert | 6.18 de-idles lanes before shared reset deassert; an earlier local patch tried changing this but did not fix the link | De-prioritized; unproven patch removed |
-| PERST#/LTSSM timing | enable Gen1 training immediately before PERST# release | upstream 6.18 enables Gen1 training, waits 100ms with endpoint still in reset, then releases PERST# | **Current top candidate** |
+| Rock Pi 4 PCIe DT supplies/timing | Armbian adds 12V supply, 3.3V min/max, 1500ms bus-scan delay | `0006` applies the same semantic DT properties | Disabled for current full-eMMC candidate `min-only0012-1` |
+| Bus-scan delay | Runs after link-up, before enumeration | `0007` implements it, but failing kernel never reaches it | Confirmed removable in `min-only0012-plus-dt-1` |
+| PM reset order | assert `aclk -> pclk -> pm`; deassert `pm -> aclk -> pclk` | `0008` preserves that order despite 6.18 bulk reset conversion | Confirmed removable in `min-no0010-no0009-no0008-1` |
+| Core reset order | assert `core -> mgmt -> mgmt-sticky -> pipe`; deassert `mgmt-sticky -> core -> mgmt -> pipe` | `0008` preserves assert order and keeps bulk deassert because reverse bulk order matches 6.1 | Confirmed removable in `min-no0010-no0009-no0008-1` |
+| PHY lane de-idle | only the first shared PHY power-on de-idles a lane, after shared PHY reset deassert and PLL-lock address selection | `0009` restores the 6.1 behavior by moving the de-idle write after reset deassert and behind the `pwr_cnt++` early return | Confirmed removable in `min-no0010-no0009-1` |
+| PHY TEST_WRITE strobe disable | `PHY_CFG_WR_DISABLE` has the same value as `PHY_CFG_WR_ENABLE`, so the write strobe is not cleared after each PHY config write | `0009` restores that 6.1 behavior | Confirmed removable in `min-no0010-no0009-1` |
+| PHY refclk lifecycle | probe gets `refclk`, PHY init prepares/enables it, PHY exit disables/unprepares it | `0010` restores the 6.1 lifecycle instead of 6.18 probe-lifetime `devm_clk_get_enabled()` | Confirmed removable in `min-no0010-1` |
+| PERST GPIO initial state | working 6.8 requested RC endpoint/PERST GPIO as `GPIOD_OUT_HIGH` | `0011` restores that state for RK3399 only | Confirmed removable in `min-no0010-no0009-no0008-no0011-1` |
+| PERST release timing | working 6.8 enabled Gen1 training, released PERST immediately, then polled link-up | `0012` skips the newer 100 ms pre-release and 100 ms post-release waits for RK3399 only | Confirmed fixed in current stack |
 
-## Upstream commits behind the top remaining delta
+## PHY deltas tested so far
 
-The PERST# behavior changed after the working 6.1 baseline:
+Two PHY behaviors changed after the working 6.1 baseline:
 
 | Commit | Date | Effect |
 |---|---:|---|
-| [`c47f90be4c89`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=c47f90be4c89d14051d43f0c88eafddf67c834ea) | 2024-07-09 | Adds `msleep(PCIE_T_PVPERL_MS)` before PERST# deassert, but leaves link training enabled before that sleep. |
-| [`70a7bfb1e515`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=70a7bfb1e515b03e54491254a4375cdfb9515227) | 2024-07-09 | Adds the 100ms post-PERST# reset-to-config wait. |
-| [`bbc6a829ad3f`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=bbc6a829ad3f054181d24a56944f944002e68898) | 2025-06-25 | Renames the post-reset wait macro to `PCIE_RESET_CONFIG_WAIT_MS`; behavior remains 100ms. |
+| [`c3fe7071e196`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=c3fe7071e196e25789ecf90dbc9e8491a98884d7) | 2025-07-22 | Moves the lane de-idle write before the shared PHY power counter so all four RK3399 lanes are enabled through GRF. |
+| [`25facbabc3fc`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=25facbabc3fc) | 2025-07-22 | Properly clears the PHY TEST_WRITE strobe after config writes by changing `PHY_CFG_WR_DISABLE` from `1` to `0`. |
 
-The patch now in this repo keeps the spec waits but moves the T_PVPERL wait
-before link-training enable:
+`0009` restores the working 6.1 relationship:
 
 ```text
-wait T_PVPERL while PERST# remains asserted
-enable Gen1 link training
-deassert PERST#
-wait PCIE_RESET_CONFIG_WAIT_MS before config/poll path continues
+if this is not the first shared PHY power-on, return immediately
+deassert shared PHY reset
+select PLL-lock config address
+take the first lane out of idle
 ```
 
-This restores the working 6.1 relationship that link training is enabled
-immediately before endpoint reset is released, while preserving the upstream
-timing intent.
+This does intentionally drop the newer all-lane de-idle behavior for this
+compatibility build, because the known-good Rock Pi 4A / SATA card baseline did
+not do that.  The resulting `v1.13.4-rockpi-pcie-phy61-strobe1` image booted,
+but still failed with `PCIe link training gen1 timeout!`, so these PHY changes
+were not sufficient.
+
+## Confirmed 6.8 PERST timing fix
+
+Armbian narrowing moved the useful regression window from "6.1 vs 6.18" to
+"6.8.11 works, 6.12.x fails".  The Armbian Rockchip64 PCIe patch stack is
+semantically unchanged across that boundary.  The final working change was an
+upstream Rockchip host-driver PERST timing delta:
+
+| Path | PERST/link-training behavior |
+|---|---|
+| Working 6.8 | enable Gen1 link training, release PERST immediately, then poll link-up |
+| Failing 6.12+/6.18 | add a 100 ms wait before PERST release and another 100 ms reset-to-config wait before link polling |
+| `0012` | restores the 6.8 timing for `rockchip,rk3399-pcie` only; confirmed working in `v1.13.4-rockpi-pcie-perst-timing68-1` |
+
+Confirmed Talos result:
+
+```text
+rockchip-pcie f8000000.pcie: wait 1500 ms (from device tree) before bus scan
+pci 0000:01:00.0: [197b:0585] type 00 class 0x010601 PCIe Legacy Endpoint
+pci 0000:01:00.0: 4.000 Gb/s available PCIe bandwidth, limited by 2.5 GT/s PCIe x2 link
+ahci 0000:01:00.0: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
+ata1: SATA link up 6.0 Gbps
+ata3: SATA link up 6.0 Gbps
+talosctl get disks: sda and sdb, both Samsung SSD 860, 2.0 TB, transport=sata
+```
 
 ## Confidence
 
@@ -115,6 +143,37 @@ timing intent.
 |---|---:|
 | The current failure happens before PCI enumeration and before `bus-scan-delay-ms` can matter. | High |
 | The live Talos DT now matches the working Armbian PCIe DT semantics. | High |
-| Reset-order-only and PHY-lane-idle-only were not sufficient, based on booted test images. | High |
-| PERST#/LTSSM ordering is the highest-value next kernel rebuild candidate. | Medium |
-| The new PERST#/LTSSM patch will fix this specific SATA card link-up. | Medium-low until tested |
+| Reset-order-only and PERST-order-only were not sufficient, based on booted test images. | High |
+| Exact 6.1 RK3399 PHY lane de-idle and TEST_WRITE strobe behavior were not sufficient by themselves. | High |
+| Restoring the 6.1 RK3399 PHY refclk lifecycle was not sufficient. | High |
+| `0011` initial PERST GPIO state alone was not sufficient. | High |
+| `0012` is a real 6.8-working to 6.12-failing upstream timing divergence. | High |
+| `0012` fixed this specific SATA card link-up in the current stack. | High |
+| `0012` is the decisive final change in the current stack, because `0011` alone failed and adding `0012` worked. | Medium-high |
+| Removing `0010` while keeping `0012` still works. | High |
+| Removing `0009` while keeping `0012` still works. | High |
+| Removing `0008` while keeping `0012` still works. | High |
+| Removing `0011` while keeping `0012` still works. | High |
+| Removing `0007`/bus-scan-delay support still works. | High |
+| Current confirmed kernel-side minimum is `0012` plus the previously active DT patch `0006`. | High |
+| Current full-eMMC candidate removes `0006`, leaving only `0012`. | Medium-low |
+| Older compatibility patches have not yet been minimized away; do not remove them outside a controlled minimization pass. | High |
+
+## Later performance backlog
+
+After minimization and stability testing, run a separate PCIe Gen2 x2
+experiment by changing the RockPi PCIe DT from:
+
+```dts
+max-link-speed = <1>;
+```
+
+to:
+
+```dts
+max-link-speed = <2>;
+```
+
+Do not combine this with minimization. The current Gen1 x2 limit is expected
+and known-good. Gen2 x2 may be possible; Gen3 x2 is not a realistic RK3399 /
+RockPi target even if the SATA endpoint advertises Gen3 capability.

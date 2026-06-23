@@ -3,3 +3,8 @@
 # Generated on 2023-11-02T09:50:52Z by kres 3a2980e-dirty.
 
 _out
+
+# Private kernel module-signing key (intentionally not committed - this repo
+# is public). See HANDOFF.md "Final resolution - pinned static signing key".
+kernel/build/certs/static-signing-key.pem
+hack/__pycache__/
