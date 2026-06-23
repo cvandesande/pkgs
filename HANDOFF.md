@@ -1,11 +1,115 @@
 # HANDOFF: Rock Pi 4A / RK3399 Talos — ZFS module signing
 
-Last updated: 2026-06-23
+Last updated: 2026-06-24
 
 Full PCIe/SATA fix and Penta HAT history (all resolved, hardware-confirmed) is
 archived in [`docs/rockpi-pcie-penta-history.md`](docs/rockpi-pcie-penta-history.md).
 This file only tracks the current active work: building a Talos installer
 with the patched kernel **and** a correctly signed ZFS kernel module.
+
+## 1.13.4 ZFS work: done, confirmed working, committed
+
+The `module.sig_enforce=0` / `bool_enable_only` / `kernel-build` cache-sharing
+/ static-key saga below is now resolved and the resulting state is committed
+on `rockpi4-pcie-reset-1.13.4` (commit `1c98d7d`). `CUSTOM_TAG=v1.13.4-rockpi-zfs`
+is built, pushed, verified (signing key match confirmed directly), and ready
+to flash — see "Ready to flash" further down. Treat everything below this
+point, up through "Ready to flash", as **historical record**, not open work.
+
+## 1.13.5 upgrade: in progress, started while user asleep
+
+User asked to build the next Talos release (1.13.5) overnight, since both
+the kernel and ZFS got version-bumped upstream. Steps taken (all read-only/
+low-risk until the final build kickoff):
+
+1. **Preserved 1.13.4 work first**: committed `1c98d7d` on
+   `rockpi4-pcie-reset-1.13.4` (hack/ scripts, this file, docs/, kernel
+   config/patches). Added `.gitignore` entries for
+   `kernel/build/certs/static-signing-key.pem` and `hack/__pycache__/`.
+   **Did not commit the static signing key** — `cvandesande/pkgs` (origin) is
+   a **public** GitHub repo; committing a private key there would eventually
+   leak it on push. The key only exists locally on disk
+   (`kernel/build/certs/static-signing-key.pem`, mode `0600`) — **back this up
+   separately** (password manager, etc.); losing this machine loses the key
+   and you'd need to regenerate + rebuild kernel+zfs-pkg again (see "Final
+   resolution" below for the exact regeneration command).
+
+2. **Found Talos v1.13.5's pinned `pkgs` revision**: `v1.13.0-36-g6b315f7`
+   (fetched the tag into the existing `talos-v1.13.4-rockpi` checkout and ran
+   `git show v1.13.5:pkg/machinery/gendata/data/pkgs`). Our base was
+   `v1.13.0-28-g54ec9fc` (what 1.13.4 pinned). Confirmed the range
+   (`git log 54ec9fc..6b315f7` against `upstream` remote, which is
+   `siderolabs/pkgs`):
+   - `ebf23f3 feat: update Linux to 6.18.36` / `d736aef feat: bump kernel to
+     6.18.35` (was 6.18.34)
+   - `6b315f7 chore: update zfs to 2.4.3` (was 2.4.2)
+   - `7ede376 fix: avoid page_table_check BUG on time namespace VVAR page` —
+     a **real kernel patch fix** for the same upstream issue
+     (siderolabs/talos#13496) that our own `54ec9fc` (itself an upstream
+     commit, predating our fork's customizations, not something we wrote)
+     worked around via Kconfig. No actual conflict: that commit only adds a
+     patch file + README line, doesn't touch the Kconfig disable. Confirmed
+     `CONFIG_PAGE_TABLE_CHECK_ENFORCED` stays `not set` all the way through
+     `6b315f7` — no need to reconsider that Kconfig choice.
+   - containerd/runc/nvidia-driver bumps, irrelevant to RockPi/ZFS.
+
+3. **Created `rockpi4-pcie-reset-1.13.5` branch** from `upstream/release-1.13`
+   at `6b315f7`, then `git cherry-pick 54ec9fc..1c98d7d` to replay our 5
+   custom commits on top. Three conflicts, all in
+   `kernel/build/patches/README.md` only (table-row insertion conflicts, not
+   real logical conflicts — `git status` showed every actual patch
+   file add/delete/rename auto-resolved cleanly by git):
+   - Combined upstream's new `0006-mm-page_table_check-...` row with ours.
+   - Same again when our own historical `0006`-`0009` patches (since
+     renamed/superseded multiple times during the PCIe minimization saga)
+     landed alongside it.
+   - Final conflict also surfaced a **pre-existing bug**: the `0005-slab-
+     backport-flex-allocator-helpers.patch` row had been accidentally
+     dropped from the README at some point on the 1.13.4 branch (file still
+     existed, just undocumented) — restored it while resolving.
+   - Result: active patch set is now `0001`-`0006` (the last being
+     upstream's new one) + `0012`, matching `kernel/build/config-arm64`'s
+     `CONFIG_MODULE_SIG_KEY="certs/static-signing-key.pem"` (survived the
+     rebase intact, verified after).
+
+4. **Verified all 7 surviving patches apply cleanly to the new kernel**
+   before committing to an hours-long build: downloaded the exact pinned
+   `linux-6.18.36.tar.xz` (checksum-verified against `Pkgfile`'s
+   `linux_sha256`), extracted, ran `patch -p1 --dry-run` for each patch in
+   `kernel/build/patches/`. All applied — some with line-number offsets
+   (expected, harmless), zero fuzz/rejects. Cleaned up the test extraction
+   afterward (not committed, was only a dry-run check).
+
+5. **Cloned a fresh `talos-v1.13.5-rockpi`** checkout at tag `v1.13.5`
+   (annotated tag, resolves to commit `51b0d8e`; verified
+   `pkg/machinery/gendata/data/pkgs` reads back `v1.13.0-36-g6b315f7`,
+   confirming this checkout actually matches the pkgs revision investigated
+   above). No manual Makefile patching needed — `hack/build-rockpi-installer-
+   with-verification.sh`'s `ensure_talos_makefile_image_patches` does this
+   automatically on first run, same as it did for the 1.13.4 checkout.
+
+6. **Kicked off the full build** in the background:
+
+   ```sh
+   TALOS_TAG=v1.13.5 \
+   TALOS_DIR=/home/cvandesande/github/talos-v1.13.5-rockpi \
+   CUSTOM_TAG=v1.13.5-rockpi-zfs \
+   hack/build-rockpi-installer-with-verification.sh
+   ```
+
+   Full pipeline, nothing skipped (fresh kernel/zfs-pkg build required since
+   versions bumped). Real kernel compile expected (~1.5-2h based on the
+   1.13.4 experience), then zfs-pkg, ZFS extension, installer-base, imager,
+   installer, eMMC raw image, all with verification. **User is asleep — do
+   not flash or run `talosctl upgrade` even if this completes successfully
+   and all checks pass; just leave the artifacts ready and update this file.**
+
+**If you're reading this because the build finished or failed:** check
+`/tmp/claude-1000/-home-cvandesande-github-pkgs/aceffb7d-4da9-4fb0-b72f-5b770363e69e/scratchpad/talos-1.13.5-build.log`
+(may not survive a reboot — it's in a session-scoped scratchpad, not a
+durable path) and the script's own summary output (private/Docker Hub
+installer refs, eMMC image paths, verification pass/fail) for the actual
+result before assuming anything below this point applied to 1.13.5 too.
 
 ## Established baseline (resolved, see archive for detail)
 
