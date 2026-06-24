@@ -614,9 +614,12 @@ in root `Makefile`'s `TARGETS`, Talos extensions checked out at
 `_out/talos-extensions-v1.13.4/`.
 
 The repository is intentionally dirty. Important untracked/generated paths:
-`artifacts/`, `staging/`, `kernel/build/patches.disabled/`,
+`artifacts/`, `staging/`,
 `kernel/build/patches/0012-...patch`, `docs/rockpi-pcie-penta-history.md`
-(new). Do not restore, remove, or commit unrelated changes (including the
+(new). The disabled PCIe minimization-candidate patches
+(`kernel/build/patches.disabled/minimize/`) were removed — they were
+ineffective and aren't needed going forward; only the active `0012` patch is
+kept. Do not restore, remove, or commit unrelated changes (including the
 pre-existing deletion of `docs/nginx-cve-minimal-build-analysis.md`) without
 checking with the user. Do not commit `artifacts/` unless explicitly
 requested.
