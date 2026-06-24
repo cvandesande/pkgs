@@ -30,22 +30,40 @@ set -euo pipefail
 #   5. Downloads the new revision's pinned kernel tarball and dry-run
 #      verifies every active RockPi patch still applies before committing
 #      to anything.
-#   6. Commits the result as a single commit and prints the build command
-#      to run next (does not build or push anything itself).
+#   6. Commits the result as a single commit.
+#   7. Runs hack/build-rockpi-installer-with-verification.sh itself -
+#      builds and pushes the kernel/zfs-pkg/installer/eMMC image. This is
+#      the whole point of the script: one command, start to finish. Set
+#      RUN_BUILD=false to stop after step 6 instead.
+#
+# A fresh clone of this repo (a different machine, say) is missing two
+# things this script needs and handles automatically:
+#   - kernel/build/certs/static-signing-key.pem is gitignored (private key,
+#     public repo) and only ever lives on disk. Generated fresh if missing
+#     (set GENERATE_SIGNING_KEY=false to require one already be in place).
+#   - the 'upstream' (siderolabs/pkgs) remote is local-only and isn't part
+#     of what cloning origin brings with it. Added automatically if absent.
+# Still required manually: `docker login` to whichever registries
+# hack/build-rockpi-installer-with-verification.sh pushes to.
 #
 # Override any of these in the environment:
-#   TALOS_DIR        - persistent Talos source checkout (default below)
-#   PKGS_DIR         - this repo's root (default: parent of this script)
-#   UPSTREAM_REMOTE  - pkgs git remote to pull the pinned revision from
-#   TALOS_REPO_URL   - used only if TALOS_DIR doesn't exist yet
-#   BRANCH_PREFIX    - new branch name is "${BRANCH_PREFIX}<version>"
+#   TALOS_DIR              - persistent Talos source checkout (default below)
+#   PKGS_DIR                - this repo's root (default: parent of this script)
+#   UPSTREAM_REMOTE          - pkgs git remote to pull the pinned revision from
+#   TALOS_REPO_URL           - used only if TALOS_DIR doesn't exist yet
+#   BRANCH_PREFIX            - new branch name is "${BRANCH_PREFIX}<version>"
+#   GENERATE_SIGNING_KEY     - false to require an existing key (default true)
+#   RUN_BUILD                - false to stop after committing (default true)
+#   CUSTOM_TAG               - image tag (default v<version>-rockpi-zfs)
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PKGS_DIR="${PKGS_DIR:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
 TALOS_DIR="${TALOS_DIR:-${HOME}/github/talos-rockpi}"
 TALOS_REPO_URL="${TALOS_REPO_URL:-https://github.com/siderolabs/talos.git}"
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
+UPSTREAM_REMOTE_URL="${UPSTREAM_REMOTE_URL:-https://github.com/siderolabs/pkgs.git}"
 BRANCH_PREFIX="${BRANCH_PREFIX:-rockpi4-pcie-reset-}"
+SIGNING_KEY_PATH="kernel/build/certs/static-signing-key.pem"
 
 log() {
     printf '\n==> %s\n' "$*"
@@ -69,6 +87,7 @@ require_cmd git
 require_cmd python3
 require_cmd curl
 require_cmd patch
+require_cmd openssl
 
 [[ -f "${PKGS_DIR}/Pkgfile" ]] || die "PKGS_DIR does not look like the pkgs repo: ${PKGS_DIR}"
 
@@ -77,6 +96,39 @@ ORIGIN_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [[ "${ORIGIN_BRANCH}" != "HEAD" ]] || die "currently in detached HEAD; check out the branch with the RockPi overlay first"
 git diff --quiet || die "pkgs repo has unstaged changes; commit or stash first"
 git diff --cached --quiet || die "pkgs repo has staged changes; commit or stash first"
+
+# Module-signing key is gitignored on purpose (private key, public repo) -
+# it only ever lives on disk, so a freshly cloned checkout won't have it.
+# Kernel and zfs-pkg are signed together in one build invocation regardless
+# of the key's value, so a freshly generated key works exactly as well as a
+# carried-over one - the only reason to copy an existing key over (e.g. from
+# a password manager backup) instead of letting this generate a new one is
+# to keep the same signing identity across machines, which nothing else
+# actually depends on. Set GENERATE_SIGNING_KEY=false to require one to
+# already be in place instead (e.g. if you deliberately copied one over and
+# want a missing file to be an error, not silently replaced).
+GENERATE_SIGNING_KEY="${GENERATE_SIGNING_KEY:-true}"
+if [[ ! -s "${SIGNING_KEY_PATH}" ]]; then
+    if [[ "${GENERATE_SIGNING_KEY}" == "true" ]]; then
+        log "Generating a new module-signing key at ${SIGNING_KEY_PATH}"
+        mkdir -p "$(dirname -- "${SIGNING_KEY_PATH}")"
+        openssl req -new -nodes -utf8 -sha256 -days 36500 -batch \
+            -x509 -config kernel/build/certs/x509.genkey \
+            -outform PEM -out "${SIGNING_KEY_PATH}" -keyout "${SIGNING_KEY_PATH}"
+        chmod 0600 "${SIGNING_KEY_PATH}"
+    else
+        die "${SIGNING_KEY_PATH} is missing and GENERATE_SIGNING_KEY=false; \
+copy it over from wherever you backed it up first, or unset \
+GENERATE_SIGNING_KEY to generate a fresh one."
+    fi
+fi
+
+# 'upstream' (siderolabs/pkgs) is a local-only remote, not part of what a
+# clone of origin brings with it - add it if this is a fresh checkout.
+if ! git remote get-url "${UPSTREAM_REMOTE}" >/dev/null 2>&1; then
+    log "Adding missing ${UPSTREAM_REMOTE} remote (${UPSTREAM_REMOTE_URL})"
+    git remote add "${UPSTREAM_REMOTE}" "${UPSTREAM_REMOTE_URL}"
+fi
 
 if git rev-parse -q --verify "refs/heads/${NEW_BRANCH}" >/dev/null; then
     die "branch ${NEW_BRANCH} already exists; check it out directly or delete it before re-running"
@@ -251,15 +303,41 @@ git commit -m "rockpi: carry overlay forward to Talos ${TALOS_TAG} (pkgs ${PKGS_
 trap - EXIT
 rm -rf "${VERIFY_DIR}"
 
-log "Done. New branch: ${NEW_BRANCH}"
+log "Overlay ready on branch ${NEW_BRANCH}"
+
+# --- 7. Build, sign, and image - the same script you'd run by hand ---
+# Default on: the point of this script is that running it is the whole
+# workflow. Set RUN_BUILD=false to stop here and just inspect/commit the
+# branch instead (the build pushes images to both registries, so it's
+# worth being able to opt out).
+RUN_BUILD="${RUN_BUILD:-true}"
+CUSTOM_TAG="${CUSTOM_TAG:-v${TALOS_VERSION}-rockpi-zfs}"
+BUILD_CMD=(
+    env
+    "TALOS_TAG=${TALOS_TAG}"
+    "TALOS_DIR=${TALOS_DIR}"
+    "CUSTOM_TAG=${CUSTOM_TAG}"
+    "${PKGS_DIR}/hack/build-rockpi-installer-with-verification.sh"
+)
+
+if [[ "${RUN_BUILD}" != "true" ]]; then
+    cat <<EOF
+
+RUN_BUILD=false: stopping here. Nothing has been built, pushed, flashed, or
+upgraded. To build, sign, and produce the eMMC image:
+
+  ${BUILD_CMD[*]}
+EOF
+    exit 0
+fi
+
+log "Building, signing, and imaging (kernel compile is ~1.5-2h) - CUSTOM_TAG=${CUSTOM_TAG}"
+"${BUILD_CMD[@]}"
+
+log "Done. ${NEW_BRANCH} built and pushed as ${CUSTOM_TAG}."
 cat <<EOF
 
-Next step - build and push (this will take ~1.5-2h for the kernel compile):
+This did NOT flash or run 'talosctl upgrade' - that's still your call:
 
-  TALOS_TAG=${TALOS_TAG} \\
-  TALOS_DIR=${TALOS_DIR} \\
-  CUSTOM_TAG=v${TALOS_VERSION}-rockpi-zfs \\
-  hack/build-rockpi-installer-with-verification.sh
-
-Nothing has been built, pushed, flashed, or upgraded by this script.
+  talosctl -e <node> -n <node> upgrade --image docker.io/cvandesande/talos:${CUSTOM_TAG}
 EOF
